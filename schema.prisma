@@ -1,0 +1,130 @@
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Legislation {
+  id                  Int       @id @default(autoincrement())
+  congress            Int?
+  introducedDate      DateTime?
+  number              String?
+  title               String?   @db.Text
+  type                String?
+  url                 String?   @db.VarChar(500)
+  amendmentNumber     String?
+  policy_area_id      Int?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  name_id             String?   @unique(map: "Legislation_name_id_key")
+  fine_print          String?   @db.Text
+  hidden_implications String?   @db.Text
+  key_terms           String?   @db.Text
+  bill_size           String?
+  word_count          Int?
+
+  relatedBills RelatedLegislation[]
+  actions      BillAction[]
+  userTracks   UserBillTrack[]
+  summaries    BillSummary[]
+  aiSummaries  BillAiSummary[]
+
+  @@index([policy_area_id], map: "Legislation_policy_area_id_fkey")
+  @@map("legislation")
+}
+
+model BillSummary {
+  id            Int       @id @default(autoincrement())
+  legislationId Int
+  actionDate    DateTime?
+  actionDesc    String?
+  text          String?   @db.Text
+  updateDate    DateTime?
+  versionCode   String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@index([legislationId])
+  @@index([actionDate])
+  @@index([actionDesc])
+  @@map("billsummary")
+}
+
+model BillAction {
+  id            Int      @id @default(autoincrement())
+  legislationId Int
+  actionDate    DateTime
+  text          String   @db.Text
+  type          String
+  actionCode    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@index([legislationId])
+  @@index([actionDate])
+  @@index([type])
+  @@index([legislationId, actionDate])
+  @@map("billaction")
+}
+
+model RelatedLegislation {
+  id               Int      @id @default(autoincrement())
+  legislationId    Int
+  relatedNameId    String
+  relationshipType String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  title            String
+
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@unique([legislationId, relatedNameId, relationshipType])
+  @@index([legislationId])
+  @@index([relatedNameId])
+  @@map("relatedlegislation")
+}
+
+model UserBillTrack {
+  userId        String
+  legislationId Int
+  hasViewed     Boolean   @default(false)
+  tracking      Boolean   @default(false)
+  viewedAt      DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, legislationId])
+  @@index([userId])
+  @@index([legislationId])
+  @@index([hasViewed])
+  @@index([tracking])
+  @@map("userbilltrack")
+}
+
+model BillAiSummary {
+  id            Int       @id @default(autoincrement())
+  legislationId Int
+  actionDate    DateTime?
+  type          String?
+  text          String?   @db.Text
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@index([legislationId])
+  @@index([actionDate])
+  @@index([type])
+  @@map("billaisummary")
+}
