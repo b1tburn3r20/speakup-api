@@ -9,33 +9,498 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Legislation {
-  id                  Int       @id @default(autoincrement())
-  congress            Int?
-  introducedDate      DateTime?
-  number              String?
-  title               String?   @db.Text
-  type                String?
-  url                 String?   @db.VarChar(500)
-  amendmentNumber     String?
-  policy_area_id      Int?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-  name_id             String?   @unique(map: "Legislation_name_id_key")
-  fine_print          String?   @db.Text
-  hidden_implications String?   @db.Text
-  key_terms           String?   @db.Text
-  bill_size           String?
-  word_count          Int?
+model User {
+  id                 String              @id @default(cuid())
+  name               String?
+  username           String?             @unique(map: "User_username_key")
+  email              String?             @unique(map: "User_email_key")
+  emailVerified      DateTime?
+  image              String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  ageRange           AgeRange?
+  householdIncome    IncomeRange?
+  state              String?
+  district           Int?
+  needsOnboarding    Boolean?            @default(true)
+  roleId             Int?                @default(2)
+  billTracks         UserBillTrack[]
+  userPreferences    UserPreference[]
+  bugReports         BugReport[]
+  featureSuggestions FeatureSuggestion[]
 
-  relatedBills RelatedLegislation[]
-  actions      BillAction[]
-  userTracks   UserBillTrack[]
-  summaries    BillSummary[]
-  aiSummaries  BillAiSummary[]
+  // forum
+  forumPosts            ForumPost[]
+  forumComments         ForumComment[]
+  forumPostUpvotes      ForumPostUpvote[]
+  forumPostDownvotes    ForumPostDownvote[]
+  forumPostBookmarks    ForumPostBookmark[]
+  forumCommentUpvotes   ForumCommentUpvote[]
+  forumCommentDownvotes ForumCommentDownvote[]
 
-  @@index([policy_area_id], map: "Legislation_policy_area_id_fkey")
-  @@map("legislation")
+  accounts         Account?
+  Authenticator    Authenticator[]
+  favoritedMembers FavoritedCongressMember[]
+  sessions         Session[]
+  userVotes        UserVote[]
+  userActions      UserAction[]
+  role             Role?                     @relation(fields: [roleId], references: [id])
+
+  @@index([roleId], map: "user_roleId_fkey")
+  @@map("user")
+}
+
+model BillAction {
+  id            Int      @id @default(autoincrement())
+  legislationId Int
+  actionDate    DateTime
+  text          String   @db.Text
+  type          String
+  actionCode    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@index([legislationId])
+  @@index([actionDate])
+  @@index([type])
+  @@index([legislationId, actionDate])
+  @@map("billaction")
+}
+
+model ForumPost {
+  id        Int      @id @default(autoincrement())
+  type      String // "feature_request", "bill_discussion", "bug_report", "general"
+  title     String
+  isDeleted Boolean  @default(false) // Add this
+  body      String   @db.Text
+  authorId  String
+  isLocked  Boolean  @default(false)
+  isPinned  Boolean  @default(false)
+  isEdited  Boolean  @default(false)
+  views     Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  author    User                @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  tags      ForumPostTag[]
+  comments  ForumComment[]
+  upvotes   ForumPostUpvote[]
+  downvotes ForumPostDownvote[]
+  bookmarks ForumPostBookmark[]
+
+  @@index([authorId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([views])
+  @@index([isPinned, createdAt])
+  @@map("forumpost")
+}
+
+model BugReport {
+  id        Int      @id @default(autoincrement())
+  bug       String   @db.Text
+  userId    String
+  userRole  String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("bugreport")
+}
+
+model FeatureSuggestion {
+  id        Int      @id @default(autoincrement())
+  feature   String   @db.Text
+  userId    String
+  userRole  String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("featuresuggestion")
+}
+
+model ForumComment {
+  id        Int      @id @default(autoincrement())
+  body      String   @db.Text
+  authorId  String
+  postId    Int
+  parentId  Int? // For nested comments - null means top-level comment
+  depth     Int      @default(0) // Track nesting depth for display
+  isDeleted Boolean  @default(false)
+  isEdited  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  author    User                   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  post      ForumPost              @relation(fields: [postId], references: [id], onDelete: Cascade)
+  parent    ForumComment?          @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   ForumComment[]         @relation("CommentReplies")
+  upvotes   ForumCommentUpvote[]
+  downvotes ForumCommentDownvote[]
+
+  @@index([authorId])
+  @@index([postId])
+  @@index([parentId])
+  @@index([postId, parentId])
+  @@index([createdAt])
+  @@map("forumcomment")
+}
+
+model ForumTag {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  color       String?
+  isOfficial  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  posts ForumPostTag[]
+
+  @@index([name])
+  @@map("forumtag")
+}
+
+model ForumPostTag {
+  postId Int
+  tagId  Int
+
+  post ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag  ForumTag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([postId, tagId])
+  @@index([postId])
+  @@index([tagId])
+  @@map("forumposttag")
+}
+
+model ForumPostUpvote {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  postId    Int
+  createdAt DateTime @default(now())
+
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([userId])
+  @@index([postId])
+  @@map("forumpostupvote")
+}
+
+model ForumPostDownvote {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  postId    Int
+  createdAt DateTime @default(now())
+
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([userId])
+  @@index([postId])
+  @@map("forumpostdownvote")
+}
+
+model ForumPostBookmark {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  postId    Int
+  createdAt DateTime @default(now())
+
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post ForumPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([userId])
+  @@index([postId])
+  @@map("forumpostbookmark")
+}
+
+model ForumCommentUpvote {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  commentId Int
+  createdAt DateTime @default(now())
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment ForumComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, commentId])
+  @@index([userId])
+  @@index([commentId])
+  @@map("forumcommentupvote")
+}
+
+model ForumCommentDownvote {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  commentId Int
+  createdAt DateTime @default(now())
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment ForumComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, commentId])
+  @@index([userId])
+  @@index([commentId])
+  @@map("forumcommentdownvote")
+}
+
+model GuestAction {
+  id        Int      @id @default(autoincrement())
+  sessionId String?
+  ipAddress String?
+  userAgent String?
+  action    String
+  entityId  String?
+  createdAt DateTime @default(now())
+
+  @@index([sessionId], map: "GuestAction_sessionId_idx")
+  @@index([action], map: "GuestAction_action_idx")
+  @@index([entityId], map: "GuestAction_entityId_idx")
+  @@index([createdAt], map: "GuestAction_createdAt_idx")
+  @@index([action, entityId], map: "GuestAction_action_entityId_idx")
+  @@map("guestaction")
+}
+
+model UserAction {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  userRole  String?
+  action    String
+  entityId  String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "UserAction_userId_idx")
+  @@index([userRole], map: "UserAction_userRole_idx")
+  @@index([action], map: "UserAction_action_idx")
+  @@index([entityId], map: "UserAction_entityId_idx")
+  @@index([createdAt], map: "UserAction_createdAt_idx")
+  @@index([userId, createdAt], map: "UserAction_userId_createdAt_idx")
+  @@index([action, entityId], map: "UserAction_action_entityId_idx")
+  @@map("useraction")
+}
+
+model Account {
+  id                       String   @id @default(cuid())
+  userId                   String   @unique(map: "Account_userId_key")
+  type                     String
+  provider                 String
+  providerAccountId        String
+  refresh_token            String?  @db.Text
+  access_token             String?  @db.Text
+  expires_at               Int?
+  token_type               String?
+  scope                    String?
+  id_token                 String?  @db.Text
+  session_state            String?
+  refresh_token_expires_in Int?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  user                     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId], map: "Account_provider_providerAccountId_key")
+  @@index([userId], map: "Account_userId_idx")
+  @@map("account")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique(map: "Session_sessionToken_key")
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "Session_userId_idx")
+  @@map("session")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token], map: "VerificationToken_identifier_token_key")
+  @@map("verificationtoken")
+}
+
+model Authenticator {
+  credentialID         String  @unique(map: "Authenticator_credentialID_key")
+  userId               String
+  providerAccountId    String
+  credentialPublicKey  String
+  counter              Int
+  credentialDeviceType String
+  credentialBackedUp   Boolean
+  transports           String?
+  user                 User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, credentialID])
+  @@map("authenticator")
+}
+
+model CongressSession {
+  congress   Int
+  bioguideId String
+  member     CongressMember @relation(fields: [bioguideId], references: [bioguideId])
+
+  @@id([congress, bioguideId])
+  @@index([bioguideId], map: "CongressSession_bioguideId_idx")
+  @@index([congress], map: "CongressSession_congress_idx")
+  @@map("congresssession")
+}
+
+model CongressMember {
+  id                          Int                       @id @default(autoincrement())
+  bioguideId                  String                    @unique(map: "CongressMember_bioguideId_key")
+  name                        String?
+  role                        String?
+  state                       String?
+  party                       String?
+  createdAt                   DateTime                  @default(now())
+  updatedAt                   DateTime                  @updatedAt
+  birthYear                   String?
+  cosponsoredLegislationCount Int?
+  firstName                   String?
+  active                      Boolean
+  honorificName               String?
+  lastName                    String?
+  sponsoredLegislationCount   Int?
+  updateDate                  DateTime?
+  contact                     String?
+  website                     String?
+  missingContactInfo          Boolean?
+  district                    String?
+  sessions                    CongressSession[]
+  favoritedBy                 FavoritedCongressMember[]
+  depiction                   Depiction?
+  terms                       CongressTerm[]
+
+  @@map("congressmember")
+}
+
+model CongressTerm {
+  id        Int            @id @default(autoincrement())
+  chamber   String?
+  startYear Int?
+  endYear   Int?
+  memberId  Int
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  member    CongressMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, chamber, startYear], map: "CongressTerm_memberId_chamber_startYear_key")
+  @@index([memberId], map: "CongressTerm_memberId_idx")
+  @@map("congressterm")
+}
+
+model FavoritedCongressMember {
+  userId      String
+  memberId    Int
+  favoritedAt DateTime       @default(now())
+  member      CongressMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, memberId])
+  @@index([memberId], map: "FavoritedCongressMember_memberId_idx")
+  @@index([userId], map: "FavoritedCongressMember_userId_idx")
+  @@map("favoritedcongressmember")
+}
+
+model Vote {
+  id             Int      @id @default(autoincrement())
+  congress       Int
+  chamber        Chamber
+  rollNumber     Int
+  date           DateTime
+  time           String?
+  description    String?  @db.Text
+  question       String?  @db.Text
+  result         String?
+  billNumber     String?
+  name_id        String?
+  totalYea       Int
+  totalNay       Int
+  totalNotVoting Int
+  totalPresent   Int      @default(0)
+  totalVoting    Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([congress, chamber, rollNumber], map: "Vote_congress_chamber_rollNumber_key")
+  @@index([congress], map: "Vote_congress_idx")
+  @@index([date], map: "Vote_date_idx")
+  @@index([name_id], map: "Vote_name_id_idx")
+  @@map("vote")
+}
+
+model UserVote {
+  id            Int          @id @default(autoincrement())
+  userId        String
+  votePosition  VotePosition
+  entityType    String
+  entityId      Int
+  legislationId Int?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, entityType, entityId], map: "UserVote_userId_entityType_entityId_key")
+  @@index([entityType, entityId], map: "UserVote_entityType_entityId_idx")
+  @@index([legislationId], map: "UserVote_legislationId_idx")
+  @@index([userId], map: "UserVote_userId_idx")
+  @@map("uservote")
+}
+
+model UserBillTrack {
+  userId        String
+  legislationId Int
+  hasViewed     Boolean   @default(false)
+  tracking      Boolean   @default(false)
+  viewedAt      DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, legislationId])
+  @@index([userId])
+  @@index([legislationId])
+  @@index([hasViewed])
+  @@index([tracking])
+  @@map("userbilltrack")
+}
+
+model MemberVote {
+  id           Int          @id @default(autoincrement())
+  voteId       Int
+  memberId     Int
+  votePosition VotePosition
+  party        String?
+  state        String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@unique([voteId, memberId], map: "MemberVote_voteId_memberId_key")
+  @@index([memberId], map: "MemberVote_memberId_idx")
+  @@index([voteId], map: "MemberVote_voteId_idx")
+  @@map("membervote")
 }
 
 model BillSummary {
@@ -57,61 +522,6 @@ model BillSummary {
   @@map("billsummary")
 }
 
-model BillAction {
-  id            Int      @id @default(autoincrement())
-  legislationId Int
-  actionDate    DateTime
-  text          String   @db.Text
-  type          String
-  actionCode    String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
-
-  @@index([legislationId])
-  @@index([actionDate])
-  @@index([type])
-  @@index([legislationId, actionDate])
-  @@map("billaction")
-}
-
-model RelatedLegislation {
-  id               Int      @id @default(autoincrement())
-  legislationId    Int
-  relatedNameId    String
-  relationshipType String
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  title            String
-
-  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
-
-  @@unique([legislationId, relatedNameId, relationshipType])
-  @@index([legislationId])
-  @@index([relatedNameId])
-  @@map("relatedlegislation")
-}
-
-model UserBillTrack {
-  userId        String
-  legislationId Int
-  hasViewed     Boolean   @default(false)
-  tracking      Boolean   @default(false)
-  viewedAt      DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
-
-  @@id([userId, legislationId])
-  @@index([userId])
-  @@index([legislationId])
-  @@index([hasViewed])
-  @@index([tracking])
-  @@map("userbilltrack")
-}
-
 model BillAiSummary {
   id            Int       @id @default(autoincrement())
   legislationId Int
@@ -127,4 +537,219 @@ model BillAiSummary {
   @@index([actionDate])
   @@index([type])
   @@map("billaisummary")
+}
+
+model RelatedLegislation {
+  id               Int      @id @default(autoincrement())
+  legislationId    Int // The main legislation
+  relatedNameId    String // The name_id of the related legislation
+  relationshipType String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  title            String
+
+  // Relations
+  legislation Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  @@unique([legislationId, relatedNameId, relationshipType])
+  @@index([legislationId])
+  @@index([relatedNameId])
+  @@map("relatedlegislation")
+}
+
+model Legislation {
+  id                  Int                  @id @default(autoincrement())
+  congress            Int?
+  introducedDate      DateTime?
+  number              String?
+  title               String?              @db.Text
+  type                String?
+  url                 String?              @db.VarChar(500)
+  amendmentNumber     String?
+  policy_area_id      Int?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  name_id             String?              @unique(map: "Legislation_name_id_key")
+  relatedBills        RelatedLegislation[]
+  // Keep these fields as they seem to be different
+  fine_print          String?              @db.Text
+  hidden_implications String?              @db.Text
+  key_terms           String?              @db.Text
+  bill_size           String?
+  word_count          Int?
+  actions             BillAction[]
+  // Relations
+  userTracks          UserBillTrack[]
+  summaries           BillSummary[]
+  aiSummaries         BillAiSummary[]
+
+  @@index([policy_area_id], map: "Legislation_policy_area_id_fkey")
+  @@map("legislation")
+}
+
+model UserPreference {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  key       String
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key], map: "UserPreference_userId_key_key")
+  @@index([userId], map: "UserPreference_userId_idx")
+  @@index([key], map: "UserPreference_key_idx")
+  @@index([userId], map: "UserPreference_userId_category_idx")
+  @@map("userpreference")
+}
+
+model Permission {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  roles RolePermission[]
+
+  @@map("permission")
+}
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  users       User[]
+
+  permissions RolePermission[]
+
+  @@map("role")
+}
+
+model RolePermission {
+  roleId       Int
+  permissionId Int
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+  @@map("rolepermission")
+}
+
+model LegislationSponsor {
+  legislationId     Int
+  sponsorBioguideId String
+
+  @@id([legislationId, sponsorBioguideId])
+  @@index([sponsorBioguideId], map: "LegislationSponsor_sponsorBioguideId_idx")
+  @@map("legislationsponsor")
+}
+
+model LegislationCosponsor {
+  legislationId       Int
+  cosponsorBioguideId String
+
+  @@id([legislationId, cosponsorBioguideId])
+  @@index([cosponsorBioguideId], map: "LegislationCosponsor_cosponsorBioguideId_idx")
+  @@map("legislationcosponsor")
+}
+
+model PolicyArea {
+  id        Int      @id @default(autoincrement())
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("policyarea")
+}
+
+model LatestAction {
+  id             Int       @id @default(autoincrement())
+  action_date    DateTime?
+  text           String?   @db.Text
+  legislation_id Int       @unique(map: "LatestAction_legislation_id_key")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([legislation_id], map: "LatestAction_legislation_id_idx")
+  @@map("latestaction")
+}
+
+model PartyHistory {
+  id                Int      @id @default(autoincrement())
+  partyName         String?
+  partyAbbreviation String?
+  startYear         Int?
+  memberId          Int
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([memberId], map: "PartyHistory_memberId_idx")
+  @@map("partyhistory")
+}
+
+model LeadershipPosition {
+  id        Int      @id @default(autoincrement())
+  congress  Int?
+  type      String?
+  memberId  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([memberId], map: "LeadershipPosition_memberId_idx")
+  @@map("leadershipposition")
+}
+
+model Depiction {
+  id          Int            @id @default(autoincrement())
+  imageUrl    String?
+  attribution String?
+  memberId    Int            @unique(map: "Depiction_memberId_key")
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  member      CongressMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([memberId], map: "Depiction_memberId_idx")
+  @@map("depiction")
+}
+
+enum IncomeRange {
+  UNDER_25000
+  FROM_25000_TO_49999
+  FROM_50000_TO_74999
+  FROM_75000_TO_99999
+  FROM_100000_TO_149999
+  FROM_150000_TO_199999
+  OVER_200000
+  PREFER_NOT_TO_SAY
+}
+
+enum AgeRange {
+  UNDER_18
+  FROM_18_TO_24
+  FROM_25_TO_34
+  FROM_35_TO_44
+  FROM_45_TO_54
+  FROM_55_TO_64
+  FROM_65_TO_74
+  OVER_75
+  PREFER_NOT_TO_SAY
+}
+
+enum Chamber {
+  HOUSE
+  SENATE
+}
+
+enum VotePosition {
+  YEA
+  NAY
+  PRESENT
+  NOT_VOTING
 }
