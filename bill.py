@@ -85,6 +85,17 @@ async def processLatestBillsData(data):
         else:
             fail_count += 1
     logger.info(f"Completed: {success_count} successful, {fail_count} failed")
+
+    logger.info(
+        """
+=============================================================================================================================================
+
+    STARTING SUMMARIES 
+
+=============================================================================================================================================
+           """
+    )
+
     for index, bill in enumerate(bill_data, 1):
         result = await fetchBillSummaries(bill)
         if result:
@@ -229,7 +240,6 @@ async def processHouseVotes(data):
 
     all_members = await prisma.congressmember.find_many()
     member_cache = {cm.bioguideId: cm for cm in all_members}
-    logger.info(f"Cached {len(member_cache)} congress members")
 
     success_count = 0
     fail_count = 0
