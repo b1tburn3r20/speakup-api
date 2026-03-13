@@ -23,6 +23,8 @@ load_dotenv()
 
 CONGRESS_API_KEY = os.getenv("CONGRESS_API_KEY")
 CONGRESS_NUMBER = 119
+RATE_LIMIT_SLEEP = 60 * 30  # 30 minute backoff for API 429
+REQUEST_TIMEOUT = 20
 
 
 def setup_logger():
@@ -44,6 +46,27 @@ def setup_logger():
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _request_with_429_retry(url: str, params: dict, context: str):
+    """Retry the same request when Congress API returns 429."""
+    while True:
+        try:
+            response = await asyncio.to_thread(
+                requests.get, url, params=params, timeout=REQUEST_TIMEOUT
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error(f"{context}: request error: {e}")
+            return None
+
+        if response.status_code == 429:
+            logger.warning(
+                f"{context}: got 429 rate limit; sleeping {RATE_LIMIT_SLEEP // 60} minutes then retrying"
+            )
+            await asyncio.sleep(RATE_LIMIT_SLEEP)
+            continue
+
+        return response
 
 
 async def fetchLatestBills():
@@ -149,7 +172,9 @@ async def fetchBillSummaries(bill):
         return
     url = f"https://api.congress.gov/v3/bill/{bill_congress}/{bill_type.lower()}/{bill_number}/summaries"
     params = {"api_key": CONGRESS_API_KEY, "format": "json"}
-    response = await asyncio.to_thread(requests.get, url, params=params)
+    response = await _request_with_429_retry(url, params, "fetchBillSummaries")
+    if response is None:
+        return None
     if response.status_code == 200:
         res = response.json()
         if res:
@@ -168,7 +193,9 @@ async def fetchBillActions(bill):
         return
     url = f"https://api.congress.gov/v3/bill/{bill_congress}/{bill_type.lower()}/{bill_number}/actions"
     params = {"api_key": CONGRESS_API_KEY, "format": "json"}
-    response = await asyncio.to_thread(requests.get, url, params=params)
+    response = await _request_with_429_retry(url, params, "fetchBillActions")
+    if response is None:
+        return None
     if response.status_code == 200:
         res = response.json()
         if res:
@@ -187,7 +214,9 @@ async def fetchBillDetails(bill):
         return
     url = f"https://api.congress.gov/v3/bill/{bill_congress}/{bill_type}/{bill_number}"
     params = params = {"api_key": CONGRESS_API_KEY}
-    response = await asyncio.to_thread(requests.get, url, params=params)
+    response = await _request_with_429_retry(url, params, f"fetchBillDetails {bill_congress}/{bill_type}/{bill_number}")
+    if response is None:
+        return None
     if response.status_code == 200:
         res = response.json()
         bill_data = res.get("bill")
@@ -282,7 +311,13 @@ async def processHouseVotes(data):
 async def fetchHouseVoteMembers(vote_obj, congress, session, roll_number, member_cache):
     url = f"https://api.congress.gov/v3/house-vote/{congress}/{session}/{roll_number}/members"
     params = {"api_key": CONGRESS_API_KEY, "format": "json"}
-    response = await asyncio.to_thread(requests.get, url, params=params)
+    response = await _request_with_429_retry(
+        url,
+        params,
+        f"fetchHouseVoteMembers {congress}/{session}/{roll_number}",
+    )
+    if response is None:
+        return None
     if response.status_code == 200:
         res = response.json()
         if res:
