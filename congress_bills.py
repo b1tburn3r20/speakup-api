@@ -40,6 +40,7 @@ COMPLETED_LOG = LOG_DIR / f"completed_bills_{TARGET_CONGRESS}.log"
 FAILED_LOG = LOG_DIR / f"failed_bills_{TARGET_CONGRESS}.log"
 
 CONGRESS_API_KEY = os.getenv("CONGRESS_API_KEY")
+FORCE_REPROCESS = os.getenv("FORCE_REPROCESS", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,20 @@ def _mark_failed(name_id: str, reason: str):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with FAILED_LOG.open("a") as f:
         f.write(f"{name_id} | {reason}\n")
+
+
+def _initialize_checkpoint_logs(force_reprocess: bool) -> set[str]:
+    """Load completed checkpoints, or reset run state for a full re-import."""
+    if force_reprocess:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if COMPLETED_LOG.exists():
+            COMPLETED_LOG.unlink()
+        if FAILED_LOG.exists():
+            FAILED_LOG.unlink()
+        logger.info("FORCE_REPROCESS enabled: cleared checkpoint logs for a full rerun")
+        return set()
+
+    return _load_completed()
 
 
 # ── HTTP helper ───────────────────────────────────────────────────────────────
@@ -346,8 +361,11 @@ async def main():
     member_cache = {cm.bioguideId: cm for cm in all_members}
     logger.info(f"Loaded {len(member_cache)} members into cache")
 
-    completed = _load_completed()
-    logger.info(f"Resuming — {len(completed)} bills already completed")
+    completed = _initialize_checkpoint_logs(FORCE_REPROCESS)
+    if FORCE_REPROCESS:
+        logger.info("Running in full reprocess mode — no bills will be skipped from checkpoint logs")
+    else:
+        logger.info(f"Resuming — {len(completed)} bills already completed")
 
     try:
         bills = await fetch_all_bills_for_congress()
