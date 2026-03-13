@@ -40,6 +40,7 @@ COMPLETED_LOG = LOG_DIR / f"completed_bills_{TARGET_CONGRESS}.log"
 FAILED_LOG = LOG_DIR / f"failed_bills_{TARGET_CONGRESS}.log"
 
 CONGRESS_API_KEY = os.getenv("CONGRESS_API_KEY")
+FORCE_REPROCESS = os.getenv("FORCE_REPROCESS", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,20 @@ def _mark_failed(name_id: str, reason: str):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with FAILED_LOG.open("a") as f:
         f.write(f"{name_id} | {reason}\n")
+
+
+def _initialize_checkpoint_logs(force_reprocess: bool) -> set[str]:
+    """Load completed checkpoints, or reset run state for a full re-import."""
+    if force_reprocess:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if COMPLETED_LOG.exists():
+            COMPLETED_LOG.unlink()
+        if FAILED_LOG.exists():
+            FAILED_LOG.unlink()
+        logger.info("FORCE_REPROCESS enabled: cleared checkpoint logs for a full rerun")
+        return set()
+
+    return _load_completed()
 
 
 # ── HTTP helper ───────────────────────────────────────────────────────────────
@@ -92,7 +107,7 @@ async def _get(url: str, params: dict) -> dict | None:
 # ── Pagination (concurrent page fetching) ────────────────────────────────────
 
 
-async def _fetch_page(base_url: str, offset: int) -> list[dict]:
+async def _fetch_page(base_url: str, offset: int) -> tuple[list[dict], dict] | tuple[None, None]:
     """Fetch a single page of bills."""
     params = {
         "api_key": CONGRESS_API_KEY,
@@ -103,34 +118,61 @@ async def _fetch_page(base_url: str, offset: int) -> list[dict]:
     data = await _get(base_url, params)
     if not data:
         logger.error(f"Failed fetching bill list at offset {offset}")
-        return []
+        return None, None
     return data.get("bills", []), data.get("pagination", {})
 
 
 async def fetch_all_bills_for_congress() -> list[dict]:
     """
     Fetch all bills for the target congress.
-    First fetches page 0 to discover total count, then fires all remaining
-    pages concurrently.
+    Iterates through every page in order so it stays paced and can retry
+    failed pages without stopping the entire import.
     """
     base_url = f"https://api.congress.gov/v3/bill/{TARGET_CONGRESS}"
 
-    # Fetch first page to get total count
-    first_bills, pagination = await _fetch_page(base_url, 0)
-    if not first_bills:
-        return []
+    all_bills: list[dict] = []
+    offset = 0
+    total = None
 
-    total = pagination.get("count", 0)
-    logger.info(f"Total bills available: {total}")
+    while True:
+        bills = None
+        pagination = None
 
-    # Build remaining offsets and fetch concurrently
-    remaining_offsets = range(PAGE_SIZE, total, PAGE_SIZE)
-    tasks = [_fetch_page(base_url, offset) for offset in remaining_offsets]
-    pages = await asyncio.gather(*tasks)
+        for attempt in range(1, 4):
+            bills, pagination = await _fetch_page(base_url, offset)
+            if bills is not None:
+                break
+            logger.warning(
+                f"Retrying bill list page offset={offset} (attempt {attempt}/3)"
+            )
+            await asyncio.sleep(RATE_LIMIT_SLEEP * attempt)
 
-    all_bills = list(first_bills)
-    for bills, _ in pages:
+        if bills is None:
+            logger.error(f"Skipping unrecoverable page at offset {offset}")
+            offset += PAGE_SIZE
+            if total is not None and offset >= total:
+                break
+            continue
+
+        if total is None:
+            total = pagination.get("count", 0)
+            logger.info(f"Total bills available: {total}")
+
+        if not bills:
+            if total is None or offset >= total:
+                break
+            offset += PAGE_SIZE
+            continue
+
         all_bills.extend(bills)
+        logger.info(
+            f"Fetched page offset={offset} with {len(bills)} bills "
+            f"(running total {len(all_bills)}/{total if total is not None else '?'})"
+        )
+
+        offset += PAGE_SIZE
+        if total is not None and offset >= total:
+            break
 
     logger.info(f"Fetched {len(all_bills)} bills for congress {TARGET_CONGRESS}")
     return all_bills
@@ -319,8 +361,11 @@ async def main():
     member_cache = {cm.bioguideId: cm for cm in all_members}
     logger.info(f"Loaded {len(member_cache)} members into cache")
 
-    completed = _load_completed()
-    logger.info(f"Resuming — {len(completed)} bills already completed")
+    completed = _initialize_checkpoint_logs(FORCE_REPROCESS)
+    if FORCE_REPROCESS:
+        logger.info("Running in full reprocess mode — no bills will be skipped from checkpoint logs")
+    else:
+        logger.info(f"Resuming — {len(completed)} bills already completed")
 
     try:
         bills = await fetch_all_bills_for_congress()
