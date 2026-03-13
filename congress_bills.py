@@ -40,6 +40,7 @@ COMPLETED_LOG = LOG_DIR / f"completed_bills_{TARGET_CONGRESS}.log"
 FAILED_LOG = LOG_DIR / f"failed_bills_{TARGET_CONGRESS}.log"
 
 CONGRESS_API_KEY = os.getenv("CONGRESS_API_KEY")
+FORCE_REPROCESS = os.getenv("FORCE_REPROCESS", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,20 @@ def _mark_failed(name_id: str, reason: str):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with FAILED_LOG.open("a") as f:
         f.write(f"{name_id} | {reason}\n")
+
+
+def _initialize_checkpoint_logs(force_reprocess: bool) -> set[str]:
+    """Load completed checkpoints, or reset run state for a full re-import."""
+    if force_reprocess:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if COMPLETED_LOG.exists():
+            COMPLETED_LOG.unlink()
+        if FAILED_LOG.exists():
+            FAILED_LOG.unlink()
+        logger.info("FORCE_REPROCESS enabled: cleared checkpoint logs for a full rerun")
+        return set()
+
+    return _load_completed()
 
 
 # ── HTTP helper ───────────────────────────────────────────────────────────────
@@ -92,7 +107,7 @@ async def _get(url: str, params: dict) -> dict | None:
 # ── Pagination (concurrent page fetching) ────────────────────────────────────
 
 
-async def _fetch_page(base_url: str, offset: int) -> list[dict]:
+async def _fetch_page(base_url: str, offset: int) -> tuple[list[dict], dict] | tuple[None, None]:
     """Fetch a single page of bills."""
     params = {
         "api_key": CONGRESS_API_KEY,
@@ -103,34 +118,61 @@ async def _fetch_page(base_url: str, offset: int) -> list[dict]:
     data = await _get(base_url, params)
     if not data:
         logger.error(f"Failed fetching bill list at offset {offset}")
-        return []
+        return None, None
     return data.get("bills", []), data.get("pagination", {})
 
 
 async def fetch_all_bills_for_congress() -> list[dict]:
     """
     Fetch all bills for the target congress.
-    First fetches page 0 to discover total count, then fires all remaining
-    pages concurrently.
+    Iterates through every page in order so it stays paced and can retry
+    failed pages without stopping the entire import.
     """
     base_url = f"https://api.congress.gov/v3/bill/{TARGET_CONGRESS}"
 
-    # Fetch first page to get total count
-    first_bills, pagination = await _fetch_page(base_url, 0)
-    if not first_bills:
-        return []
+    all_bills: list[dict] = []
+    offset = 0
+    total = None
 
-    total = pagination.get("count", 0)
-    logger.info(f"Total bills available: {total}")
+    while True:
+        bills = None
+        pagination = None
 
-    # Build remaining offsets and fetch concurrently
-    remaining_offsets = range(PAGE_SIZE, total, PAGE_SIZE)
-    tasks = [_fetch_page(base_url, offset) for offset in remaining_offsets]
-    pages = await asyncio.gather(*tasks)
+        for attempt in range(1, 4):
+            bills, pagination = await _fetch_page(base_url, offset)
+            if bills is not None:
+                break
+            logger.warning(
+                f"Retrying bill list page offset={offset} (attempt {attempt}/3)"
+            )
+            await asyncio.sleep(RATE_LIMIT_SLEEP * attempt)
 
-    all_bills = list(first_bills)
-    for bills, _ in pages:
+        if bills is None:
+            logger.error(f"Skipping unrecoverable page at offset {offset}")
+            offset += PAGE_SIZE
+            if total is not None and offset >= total:
+                break
+            continue
+
+        if total is None:
+            total = pagination.get("count", 0)
+            logger.info(f"Total bills available: {total}")
+
+        if not bills:
+            if total is None or offset >= total:
+                break
+            offset += PAGE_SIZE
+            continue
+
         all_bills.extend(bills)
+        logger.info(
+            f"Fetched page offset={offset} with {len(bills)} bills "
+            f"(running total {len(all_bills)}/{total if total is not None else '?'})"
+        )
+
+        offset += PAGE_SIZE
+        if total is not None and offset >= total:
+            break
 
     logger.info(f"Fetched {len(all_bills)} bills for congress {TARGET_CONGRESS}")
     return all_bills
@@ -149,29 +191,36 @@ async def process_bill(
     """
     Full cycle for one bill, guarded by a semaphore to cap concurrency.
     Updates shared `counters` dict for live progress tracking.
+    This function never raises: every error is contained at bill-level.
     """
     congress = bill.get("congress")
     bill_type = bill.get("type", "").upper()
     bill_number = bill.get("number")
 
-    if not all([congress, bill_type, bill_number]):
-        logger.warning(f"Skipping bill with missing fields: {bill}")
-        return False
+    name_id = None
+    if all([congress, bill_type, bill_number]):
+        name_id = f"{congress}{bill_type}{bill_number}"
 
-    if bill_type not in VALID_BILL_TYPES:
-        counters["skipped"] += 1
-        return False
+    try:
+        if not all([congress, bill_type, bill_number]):
+            logger.warning(f"Skipping bill with missing fields: {bill}")
+            counters["fail"] += 1
+            _mark_failed(str(bill), "missing required bill fields")
+            return False
 
-    name_id = f"{congress}{bill_type}{bill_number}"
+        if bill_type not in VALID_BILL_TYPES:
+            counters["skipped"] += 1
+            _mark_failed(name_id, f"unsupported bill type: {bill_type}")
+            return False
 
-    if name_id in completed:
-        logger.debug(f"Skipping already-completed: {name_id}")
-        counters["skipped"] += 1
-        return True
+        if name_id in completed:
+            logger.debug(f"Skipping already-completed: {name_id}")
+            counters["skipped"] += 1
+            return True
 
-    async with semaphore:
-        logger.info(f"Processing {name_id}")
-        try:
+        async with semaphore:
+            logger.info(f"Processing {name_id}")
+
             # 1. Basic details
             legislation = await fetchBillDetails(bill)
             if not legislation:
@@ -179,34 +228,47 @@ async def process_bill(
                 counters["fail"] += 1
                 return False
 
-            # 2. Actions + 3. Summaries — run concurrently
+            # 2. Actions + 3. Summaries — run concurrently, isolate exceptions
             actions_task = asyncio.create_task(fetchBillActions(bill))
             summaries_task = asyncio.create_task(fetchBillSummaries(bill))
-            actions_ok, summaries_ok = await asyncio.gather(
-                actions_task, summaries_task
+            actions_result, summaries_result = await asyncio.gather(
+                actions_task, summaries_task, return_exceptions=True
             )
 
-            if not actions_ok:
+            if isinstance(actions_result, Exception):
+                logger.error(f"{name_id}: actions raised exception: {actions_result}")
+                _mark_failed(name_id, f"actions exception: {actions_result}")
+            elif not actions_result:
                 logger.warning(f"{name_id}: actions failed, continuing")
-            if not summaries_ok:
+                _mark_failed(name_id, "actions failed")
+
+            if isinstance(summaries_result, Exception):
+                logger.error(f"{name_id}: summaries raised exception: {summaries_result}")
+                _mark_failed(name_id, f"summaries exception: {summaries_result}")
+            elif not summaries_result:
                 logger.warning(f"{name_id}: summaries failed, continuing")
+                _mark_failed(name_id, "summaries failed")
 
             # 4. House votes
             if bill_type in ("HR", "HJRES", "HRES", "HCONRES"):
-                await process_house_votes_for_bill(bill, member_cache)
+                try:
+                    await process_house_votes_for_bill(bill, member_cache)
+                except Exception as e:
+                    logger.error(f"{name_id}: house votes failed: {e}")
+                    _mark_failed(name_id, f"house votes failed: {e}")
 
             _mark_completed(name_id)
             completed.add(name_id)
             counters["success"] += 1
             return True
 
-        except Exception as e:
-            logger.error(f"Error processing {name_id}: {e}")
-            _mark_failed(name_id, str(e))
-            counters["fail"] += 1
-            return False
-        finally:
-            counters["done"] += 1
+    except Exception as e:
+        logger.error(f"Error processing {name_id or bill}: {e}", exc_info=True)
+        _mark_failed(name_id or str(bill), str(e))
+        counters["fail"] += 1
+        return False
+    finally:
+        counters["done"] += 1
 
 
 async def process_house_votes_for_bill(bill: dict, member_cache: dict):
@@ -319,17 +381,19 @@ async def main():
     member_cache = {cm.bioguideId: cm for cm in all_members}
     logger.info(f"Loaded {len(member_cache)} members into cache")
 
-    completed = _load_completed()
-    logger.info(f"Resuming — {len(completed)} bills already completed")
+    completed = _initialize_checkpoint_logs(FORCE_REPROCESS)
+    if FORCE_REPROCESS:
+        logger.info("Running in full reprocess mode — no bills will be skipped from checkpoint logs")
+    else:
+        logger.info(f"Resuming — {len(completed)} bills already completed")
 
     try:
         bills = await fetch_all_bills_for_congress()
 
-        # Only queue bills that pass the type filter
-        eligible = [b for b in bills if b.get("type", "").upper() in VALID_BILL_TYPES]
+        # Process every fetched bill so progress reflects full footprint.
         logger.info(
-            f"{len(eligible)} eligible bills to process "
-            f"({len(bills) - len(eligible)} skipped by type filter)"
+            f"{len(bills)} bills fetched for processing "
+            f"(type filtering and prior completion handled per-bill)"
         )
 
         semaphore = asyncio.Semaphore(CONCURRENCY)
@@ -338,15 +402,24 @@ async def main():
 
         # Start the background progress reporter
         reporter = asyncio.create_task(
-            progress_reporter(counters, len(eligible), stop_event)
+            progress_reporter(counters, len(bills), stop_event)
         )
 
         # Fire all bill tasks concurrently (semaphore caps parallelism)
         tasks = [
             process_bill(bill, completed, member_cache, semaphore, counters)
-            for bill in eligible
+            for bill in bills
         ]
-        await asyncio.gather(*tasks)
+        task_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        unhandled_task_errors = sum(
+            1 for r in task_results if isinstance(r, Exception)
+        )
+        if unhandled_task_errors:
+            counters["fail"] += unhandled_task_errors
+            logger.error(
+                f"Encountered {unhandled_task_errors} unexpected task-level exceptions"
+            )
 
         stop_event.set()
         await reporter

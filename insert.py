@@ -49,8 +49,25 @@ async def upsert_bill_details(bill_data):
         bill_title = bill_data.get("title")
         bill_type = bill_data.get("type")
         bill_url = bill_data.get("url")
+        policy_area_name = (bill_data.get("policyArea") or {}).get("name")
+
         #
         name_id = create_name_id(congress, bill_type, bill_number)
+
+        policy_area_id = None
+        if policy_area_name:
+            existing_policy_area = await prisma.policyarea.find_first(
+                where={"name": policy_area_name}
+            )
+
+            if existing_policy_area:
+                policy_area_id = existing_policy_area.id
+            else:
+                created_policy_area = await prisma.policyarea.create(
+                    data={"name": policy_area_name}
+                )
+                policy_area_id = created_policy_area.id
+
         legislation = await prisma.legislation.upsert(
             where={"name_id": name_id},
             data={
@@ -61,6 +78,7 @@ async def upsert_bill_details(bill_data):
                     "title": bill_title,
                     "type": bill_type,
                     "url": bill_url,
+                    "policy_area_id": policy_area_id,
                 },
                 "update": {
                     "congress": congress,
@@ -69,6 +87,7 @@ async def upsert_bill_details(bill_data):
                     "title": bill_title,
                     "type": bill_type,
                     "url": bill_url,
+                    "policy_area_id": policy_area_id,
                 },
             },
         )
