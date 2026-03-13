@@ -191,29 +191,36 @@ async def process_bill(
     """
     Full cycle for one bill, guarded by a semaphore to cap concurrency.
     Updates shared `counters` dict for live progress tracking.
+    This function never raises: every error is contained at bill-level.
     """
     congress = bill.get("congress")
     bill_type = bill.get("type", "").upper()
     bill_number = bill.get("number")
 
-    if not all([congress, bill_type, bill_number]):
-        logger.warning(f"Skipping bill with missing fields: {bill}")
-        return False
+    name_id = None
+    if all([congress, bill_type, bill_number]):
+        name_id = f"{congress}{bill_type}{bill_number}"
 
-    if bill_type not in VALID_BILL_TYPES:
-        counters["skipped"] += 1
-        return False
+    try:
+        if not all([congress, bill_type, bill_number]):
+            logger.warning(f"Skipping bill with missing fields: {bill}")
+            counters["fail"] += 1
+            _mark_failed(str(bill), "missing required bill fields")
+            return False
 
-    name_id = f"{congress}{bill_type}{bill_number}"
+        if bill_type not in VALID_BILL_TYPES:
+            counters["skipped"] += 1
+            _mark_failed(name_id, f"unsupported bill type: {bill_type}")
+            return False
 
-    if name_id in completed:
-        logger.debug(f"Skipping already-completed: {name_id}")
-        counters["skipped"] += 1
-        return True
+        if name_id in completed:
+            logger.debug(f"Skipping already-completed: {name_id}")
+            counters["skipped"] += 1
+            return True
 
-    async with semaphore:
-        logger.info(f"Processing {name_id}")
-        try:
+        async with semaphore:
+            logger.info(f"Processing {name_id}")
+
             # 1. Basic details
             legislation = await fetchBillDetails(bill)
             if not legislation:
@@ -221,34 +228,47 @@ async def process_bill(
                 counters["fail"] += 1
                 return False
 
-            # 2. Actions + 3. Summaries — run concurrently
+            # 2. Actions + 3. Summaries — run concurrently, isolate exceptions
             actions_task = asyncio.create_task(fetchBillActions(bill))
             summaries_task = asyncio.create_task(fetchBillSummaries(bill))
-            actions_ok, summaries_ok = await asyncio.gather(
-                actions_task, summaries_task
+            actions_result, summaries_result = await asyncio.gather(
+                actions_task, summaries_task, return_exceptions=True
             )
 
-            if not actions_ok:
+            if isinstance(actions_result, Exception):
+                logger.error(f"{name_id}: actions raised exception: {actions_result}")
+                _mark_failed(name_id, f"actions exception: {actions_result}")
+            elif not actions_result:
                 logger.warning(f"{name_id}: actions failed, continuing")
-            if not summaries_ok:
+                _mark_failed(name_id, "actions failed")
+
+            if isinstance(summaries_result, Exception):
+                logger.error(f"{name_id}: summaries raised exception: {summaries_result}")
+                _mark_failed(name_id, f"summaries exception: {summaries_result}")
+            elif not summaries_result:
                 logger.warning(f"{name_id}: summaries failed, continuing")
+                _mark_failed(name_id, "summaries failed")
 
             # 4. House votes
             if bill_type in ("HR", "HJRES", "HRES", "HCONRES"):
-                await process_house_votes_for_bill(bill, member_cache)
+                try:
+                    await process_house_votes_for_bill(bill, member_cache)
+                except Exception as e:
+                    logger.error(f"{name_id}: house votes failed: {e}")
+                    _mark_failed(name_id, f"house votes failed: {e}")
 
             _mark_completed(name_id)
             completed.add(name_id)
             counters["success"] += 1
             return True
 
-        except Exception as e:
-            logger.error(f"Error processing {name_id}: {e}")
-            _mark_failed(name_id, str(e))
-            counters["fail"] += 1
-            return False
-        finally:
-            counters["done"] += 1
+    except Exception as e:
+        logger.error(f"Error processing {name_id or bill}: {e}", exc_info=True)
+        _mark_failed(name_id or str(bill), str(e))
+        counters["fail"] += 1
+        return False
+    finally:
+        counters["done"] += 1
 
 
 async def process_house_votes_for_bill(bill: dict, member_cache: dict):
@@ -370,11 +390,10 @@ async def main():
     try:
         bills = await fetch_all_bills_for_congress()
 
-        # Only queue bills that pass the type filter
-        eligible = [b for b in bills if b.get("type", "").upper() in VALID_BILL_TYPES]
+        # Process every fetched bill so progress reflects full footprint.
         logger.info(
-            f"{len(eligible)} eligible bills to process "
-            f"({len(bills) - len(eligible)} skipped by type filter)"
+            f"{len(bills)} bills fetched for processing "
+            f"(type filtering and prior completion handled per-bill)"
         )
 
         semaphore = asyncio.Semaphore(CONCURRENCY)
@@ -383,15 +402,24 @@ async def main():
 
         # Start the background progress reporter
         reporter = asyncio.create_task(
-            progress_reporter(counters, len(eligible), stop_event)
+            progress_reporter(counters, len(bills), stop_event)
         )
 
         # Fire all bill tasks concurrently (semaphore caps parallelism)
         tasks = [
             process_bill(bill, completed, member_cache, semaphore, counters)
-            for bill in eligible
+            for bill in bills
         ]
-        await asyncio.gather(*tasks)
+        task_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        unhandled_task_errors = sum(
+            1 for r in task_results if isinstance(r, Exception)
+        )
+        if unhandled_task_errors:
+            counters["fail"] += unhandled_task_errors
+            logger.error(
+                f"Encountered {unhandled_task_errors} unexpected task-level exceptions"
+            )
 
         stop_event.set()
         await reporter
